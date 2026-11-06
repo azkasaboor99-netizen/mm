@@ -69,9 +69,9 @@ Z_MIN, Z_MAX = -3.0, 6.0   # z-scores are clamped so single metrics cannot domin
 # Latency and pause baselines follow the project specification; velocity-variability
 # and path-deviation values are prototype reference values for this demo.
 NORMS = {
-    "45-55": {"latency_ms": (260.0, 35.0), "pauses": (0.5, 0.4), "vel_cv": (32.0, 8.0), "path_dev_mm": (2.5, 1.2)},
-    "56-65": {"latency_ms": (280.0, 40.0), "pauses": (0.5, 0.4), "vel_cv": (35.0, 9.0), "path_dev_mm": (3.0, 1.5)},
-    "66-85": {"latency_ms": (340.0, 50.0), "pauses": (0.5, 0.4), "vel_cv": (40.0, 10.0), "path_dev_mm": (3.8, 1.8)},
+    "45-55": {"latency_ms": (260.0, 35.0), "pauses": (0.5, 0.7), "vel_cv": (32.0, 8.0), "path_dev_mm": (2.5, 1.2)},
+    "56-65": {"latency_ms": (280.0, 40.0), "pauses": (0.5, 0.7), "vel_cv": (35.0, 9.0), "path_dev_mm": (3.0, 1.5)},
+    "66-85": {"latency_ms": (340.0, 50.0), "pauses": (0.5, 0.7), "vel_cv": (40.0, 10.0), "path_dev_mm": (3.8, 1.8)},
 }
 
 FEATURES = ["age", "education", "vascular", "latency_ms", "pauses", "vel_cv", "path_dev_mm", "verbal_ratio"]
@@ -148,10 +148,12 @@ function setProgress(idx){
     progEl.appendChild(d);
   }
 }
+function newTrail(){
+  return {next:1,t0:0,lastT:0,lastPt:null,intervals:[],dists:[],errors:0,samples:[],devs:[],strs:[],firstMs:null};
+}
 function newState(){
-  return {phase:"intro", lat:[], early:0, goT:0, timer:null,
-    trail:{next:1,t0:0,lastT:0,lastPt:null,intervals:[],dists:[],errors:0,samples:[],devs:[],strs:[],firstMs:null},
-    digit:{seq:"",entered:""}};
+  return {phase:"intro", lat:[], early:0, goT:0, timer:null, reactPractice:false, trailPractice:false,
+    trail:newTrail(), digit:{seq:"",entered:"",len:3,practice:true}};
 }
 function clearTimers(){ if (S && S.timer){ clearTimeout(S.timer); S.timer = null; } }
 function mean(a){ var s = 0; for (var i = 0; i < a.length; i++){ s += a[i]; } return a.length ? s / a.length : 0; }
@@ -169,7 +171,8 @@ function showIntro(){
 function startReaction(){
   clearTimers(); S.phase = "wait"; setProgress(0);
   phaseEl.textContent = "Task 1 of 3: Reaction";
-  msgEl.textContent = "Trial " + (S.lat.length + 1) + " of " + N_TRIALS + ". Tap the circle as soon as it turns green. Do not tap before.";
+  msgEl.textContent = (S.reactPractice ? "Trial " + (S.lat.length + 1) + " of " + N_TRIALS + ". " : "Practice trial (not scored). ") +
+    "Tap the circle as soon as it turns green. Do not tap before.";
   stage.innerHTML = '<div class="center"><button type="button" class="target wait" id="tgt">Wait</button></div>';
   var t = document.getElementById("tgt");
   t.addEventListener("pointerdown", onTarget);
@@ -198,6 +201,12 @@ function onTarget(e){
       S.timer = setTimeout(startReaction, 1000);
       return;
     }
+    if (!S.reactPractice){
+      S.reactPractice = true;
+      t.className = "target done"; t.textContent = "Practice " + Math.round(rt) + " ms";
+      S.timer = setTimeout(startReaction, 1000);
+      return;
+    }
     S.lat.push(r(rt, 1));
     t.className = "target done"; t.textContent = Math.round(rt) + " ms";
     S.timer = setTimeout(function(){
@@ -209,14 +218,18 @@ function onTarget(e){
 function showTrailIntro(){
   S.phase = "trailIntro"; setProgress(1);
   phaseEl.textContent = "Task 2 of 3: Trail";
-  msgEl.textContent = "Tap the numbers 1 to 6 in order, as quickly and accurately as you can.";
-  stage.innerHTML = '<div class="center"><button type="button" class="btn" id="goTrail">Show numbers</button></div>';
+  var practice = !S.trailPractice;
+  msgEl.textContent = practice
+    ? "Practice run (not scored): tap the numbers 1 to 6 in order."
+    : "Timed run: tap the numbers 1 to 6 in order, as quickly and accurately as you can.";
+  stage.innerHTML = '<div class="center"><button type="button" class="btn" id="goTrail">' +
+    (practice ? "Start practice run" : "Start timed run") + '</button></div>';
   document.getElementById("goTrail").addEventListener("click", startTrail);
   setHeight();
 }
 
 function startTrail(){
-  S.phase = "trail"; var T = S.trail; stage.innerHTML = "";
+  S.phase = "trail"; S.trail = newTrail(); var T = S.trail; stage.innerHTML = "";
   for (var i = 0; i < N_TARGETS; i++){
     var b = document.createElement("button");
     b.type = "button"; b.className = "node"; b.textContent = String(i + 1); b.setAttribute("data-n", String(i + 1));
@@ -268,22 +281,36 @@ function onNode(e){
   T.lastT = now; T.lastPt = pt; T.samples = []; T.next++;
   if (T.next > N_TARGETS){
     S.phase = "trailDone"; stage.onpointermove = null;
-    setTimeout(showDigitIntro, 500);
+    if (!S.trailPractice) { S.trailPractice = true; setTimeout(showTrailIntro, 700); }
+    else { setTimeout(showDigitIntro, 500); }
   }
 }
 
 function showDigitIntro(){
   S.phase = "digitIntro"; setProgress(2);
   phaseEl.textContent = "Task 3 of 3: Digit recall";
-  msgEl.textContent = "Memorize " + SPAN_LEN + " digits shown for a few seconds, then enter them in the same order.";
-  stage.innerHTML = '<div class="center"><button type="button" class="btn" id="goDigit">Show digits</button></div>';
+  var practice = S.digit.practice;
+  msgEl.textContent = practice
+    ? "Practice (not scored): memorize 3 digits, then enter them in the same order."
+    : "Memorize " + SPAN_LEN + " digits shown for a few seconds, then enter them in the same order.";
+  stage.innerHTML = '<div class="center"><button type="button" class="btn" id="goDigit">' +
+    (practice ? "Show practice digits" : "Show digits") + '</button></div>';
   document.getElementById("goDigit").addEventListener("click", startDigits);
   setHeight();
 }
+function afterDigitPractice(){
+  S.digit.practice = false; S.digit.entered = ""; S.digit.seq = ""; S.phase = "digitIntro";
+  msgEl.textContent = "Practice complete.";
+  stage.innerHTML = '<div class="center"><div class="done-title">Practice complete</div>' +
+    '<div class="done-sub">Next is the scored round with ' + SPAN_LEN + ' digits.</div>' +
+    '<button type="button" class="btn" id="goReal">Continue</button></div>';
+  document.getElementById("goReal").addEventListener("click", showDigitIntro);
+}
 
 function startDigits(){
-  var seq = [];
-  while (seq.length < SPAN_LEN){
+  var len = S.digit.practice ? 3 : SPAN_LEN, seq = [];
+  S.digit.len = len;
+  while (seq.length < len){
     var d = Math.floor(Math.random() * 10);
     if (seq.length === 0 || seq[seq.length - 1] !== d) { seq.push(d); }
   }
@@ -311,12 +338,12 @@ function showKeypad(){
     e.preventDefault();
     if (k === "C") { S.digit.entered = ""; }
     else if (k === "B") { S.digit.entered = S.digit.entered.slice(0, -1); }
-    else if (S.digit.entered.length < SPAN_LEN) { S.digit.entered += k; }
+    else if (S.digit.entered.length < S.digit.len) { S.digit.entered += k; }
     var en = document.getElementById("entry");
     en.textContent = S.digit.entered.split("").join(" ") || "\u00a0";
-    if (S.digit.entered.length === SPAN_LEN){
+    if (S.digit.entered.length === S.digit.len){
       S.phase = "digitDone";
-      setTimeout(finish, 350);
+      setTimeout(S.digit.practice ? afterDigitPractice : finish, 350);
     }
   });
   setHeight();
@@ -953,10 +980,10 @@ def train_model():
         m = len(idx)
         if m == 0:
             continue
-        lat[idx] = mean_lat[idx] + sd_lat[idx] * rng.normal(lat_shift, 1.0, m)
+        lat[idx] = mean_lat[idx] + sd_lat[idx] * rng.normal(lat_shift, 1.3, m)
         pauses[idx] = rng.poisson(pause_rate, m)
-        cv[idx] = mean_cv[idx] + sd_cv[idx] * rng.normal(cv_shift, 1.0, m)
-        dev[idx] = mean_dev[idx] + sd_dev[idx] * rng.normal(dev_shift, 1.0, m)
+        cv[idx] = mean_cv[idx] + sd_cv[idx] * rng.normal(cv_shift, 1.3, m)
+        dev[idx] = mean_dev[idx] + sd_dev[idx] * rng.normal(dev_shift, 1.3, m)
         vasc[idx] = (rng.random(m) < vasc_p).astype(float)
         verbal[idx] = rng.choice(levels, size=m, p=verbal_probs[key])
 
@@ -978,6 +1005,25 @@ def train_model():
     return model, n
 
 
+TRAIN_PREVALENCE = 0.45     # share of impaired vectors in the synthetic training set
+SCREEN_PREVALENCE = 0.15    # assumed share of people with early impairment in a screened 45-85 population
+
+
+def prior_correct(prob):
+    """Re-weight a probability learned at 45% prevalence to the assumed screening prevalence (Bayes odds correction)."""
+    prob = min(max(prob, 1e-4), 1.0 - 1e-4)
+    odds = (prob / (1.0 - prob)) * (SCREEN_PREVALENCE / (1.0 - SCREEN_PREVALENCE)) \
+        / (TRAIN_PREVALENCE / (1.0 - TRAIN_PREVALENCE))
+    return odds / (1.0 + odds)
+
+
+def final_tier(tier_z, tier_ml):
+    """A high alert needs both engines to agree. One engine alone gives at most a borderline alert."""
+    if min(tier_z, tier_ml) >= 2:
+        return 2
+    return 1 if max(tier_z, tier_ml) >= 1 else 0
+
+
 def predict_risk(model, features, z_comp):
     """Return Early-MCI risk probability in percent. Falls back to a logistic curve if the model is unavailable."""
     try:
@@ -987,7 +1033,7 @@ def predict_risk(model, features, z_comp):
         prob = float(model.predict_proba(frame)[0][1])
     except Exception:
         prob = 1.0 / (1.0 + math.exp(-(1.1 * z_comp - 1.6)))
-    return float(np.clip(prob * 100.0, 1.0, 99.0))
+    return float(np.clip(prior_correct(prob) * 100.0, 1.0, 99.0))
 
 
 # ---------------------------------------------------------------------------
@@ -1065,7 +1111,7 @@ def analyze(raw, age, edu, vasc_yes, model):
         "z_lat": z_lat, "z_pause": z_pause, "z_cv": z_cv, "z_dev": z_dev,
         "z_motor": z_motor, "z_comp": z_comp, "decoupling": decoupling,
         "domains": domains, "risk": risk, "tier_z": tier_z, "tier_ml": tier_ml,
-        "tier_final": max(tier_z, tier_ml), "vasc_yes": vasc_yes,
+        "tier_final": final_tier(tier_z, tier_ml), "vasc_yes": vasc_yes,
     }
 
 
@@ -1210,7 +1256,7 @@ def build_audit(A, ctx):
     if A["tier_z"] != A["tier_ml"]:
         lines.append(
             f"The two engines land in different bands ({TIERS[A['tier_z']]['name']} by Z-score, "
-            f"{TIERS[A['tier_ml']]['name']} by model), so the higher band is shown as the alert level."
+            f"{TIERS[A['tier_ml']]['name']} by model), so the alert level is capped at borderline: a high alert needs both to agree."
         )
     lines.append("")
     lines.append("#### 3. Differential clinical interpretation")
@@ -1375,7 +1421,8 @@ def render_sidebar():
     with st.sidebar:
         st.markdown("### ⚙️ Patient Clinical Metadata")
         st.text_input("Patient ID", key="pid")
-        st.slider("Age (years)", 45, 85, key="age")
+        st.slider("Age (years)", 45, 85, key="age",
+                  help="The norms are built for ages 45 to 85. Results for younger people are not meaningful.")
         st.slider("Years of formal education", 4, 20, key="edu")
         st.radio("Vascular risk / hypertension", ["No", "Yes"], horizontal=True, key="vasc")
         st.caption(f"Age-matched normative cohort: {cohort_for_age(st.session_state['age'])}")
@@ -1532,7 +1579,7 @@ def render_step2(A, ctx, model, n_train):
         f'<div class="t" style="color:{final["fg"]}">{final["icon"]} {esc(final["name"])}</div>'
         f'<div class="d">{esc(messages[A["tier_final"]])} Overall deviation {A["z_comp"]:+.1f} SD '
         f'({esc(TIERS[A["tier_z"]]["name"])}), model risk {A["risk"]:.0f}% ({esc(TIERS[A["tier_ml"]]["name"])}). '
-        "The alert level is the higher of the two.</div></div>",
+        "A high alert needs both engines to agree; one alone gives at most a borderline alert.</div></div>",
         unsafe_allow_html=True,
     )
     ml_color = TIERS[A["tier_ml"]]["color"]
@@ -1540,8 +1587,8 @@ def render_step2(A, ctx, model, n_train):
         f"**Early MCI risk probability: {A['risk']:.0f}%**"
         f'<div class="nc-bar"><div style="width:{A["risk"]:.0f}%;background:{ml_color}"></div></div>'
         f'<div class="nc-note">Random Forest (160 trees) trained at load time on {n_train:,} synthetic normative and '
-        "impaired vectors generated from the baseline matrix. It illustrates the approach and has not been "
-        "validated on patient data.</div>",
+        "impaired vectors generated from the baseline matrix, then re-weighted to an assumed 15% screening "
+        "prevalence. It illustrates the approach and has not been validated on patient data.</div>",
         unsafe_allow_html=True,
     )
 
