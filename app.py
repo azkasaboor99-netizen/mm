@@ -62,11 +62,6 @@ TIERS = [
     {"name": "High MCI / Vascular Risk Alert", "color": RED, "fg": "#9B2C22", "bg": "#FBE6E3", "icon": "🔴"},
 ]
 
-LIVE_LABEL = "Select Custom / Live Test"
-PRESET_A = "Preset A: Healthy Control (62yo) - Fast reaction (~280ms), 0 pauses"
-PRESET_B = "Preset B: Early MCI / High Hesitation (69yo) - Normal final result, high sub-second hesitation (580ms, 4 pauses)"
-PRESET_C = "Preset C: Vascular Cognitive Impairment (74yo) - High latency & motor-tremor deviation"
-
 PAUSE_MS = 1000.0          # an inter-tap gap above this counts as a hesitation pause
 Z_MIN, Z_MAX = -3.0, 6.0   # z-scores are clamped so single metrics cannot dominate the display
 
@@ -80,40 +75,6 @@ NORMS = {
 }
 
 FEATURES = ["age", "education", "vascular", "latency_ms", "pauses", "vel_cv", "path_dev_mm", "verbal_ratio"]
-
-# Demo patients. "raw" has the same structure the live task produces.
-PRESETS = {
-    PRESET_A: {
-        "pid": "KZ-DEMO-A-0062", "age": 62, "edu": 15, "vasc": "No",
-        "raw": {
-            "latencies_ms": [272.0, 288.0, 280.0], "false_starts": 0,
-            "intervals_ms": [640.0, 560.0, 690.0, 610.0, 650.0],
-            "distances_mm": [30.0, 58.0, 41.0, 66.0, 36.0],
-            "errors": 0, "path_dev_mm": 2.7, "straightness": 0.88,
-            "digit_shown": "5826", "digit_entered": "5826", "digit_correct": 4, "digit_length": 4,
-        },
-    },
-    PRESET_B: {
-        "pid": "KZ-DEMO-B-0069", "age": 69, "edu": 16, "vasc": "No",
-        "raw": {
-            "latencies_ms": [566.0, 601.0, 573.0], "false_starts": 0,
-            "intervals_ms": [1210.0, 1480.0, 690.0, 1350.0, 1620.0],
-            "distances_mm": [30.0, 58.0, 41.0, 66.0, 36.0],
-            "errors": 0, "path_dev_mm": 3.3, "straightness": 0.85,
-            "digit_shown": "4297", "digit_entered": "4297", "digit_correct": 4, "digit_length": 4,
-        },
-    },
-    PRESET_C: {
-        "pid": "KZ-DEMO-C-0074", "age": 74, "edu": 9, "vasc": "Yes",
-        "raw": {
-            "latencies_ms": [455.0, 492.0, 468.0], "false_starts": 1,
-            "intervals_ms": [980.0, 1260.0, 1090.0, 870.0, 1410.0],
-            "distances_mm": [22.0, 70.0, 28.0, 74.0, 20.0],
-            "errors": 1, "path_dev_mm": 8.6, "straightness": 0.58,
-            "digit_shown": "7391", "digit_entered": "7394", "digit_correct": 3, "digit_length": 4,
-        },
-    },
-}
 
 # ---------------------------------------------------------------------------
 # Client-side task (runs in the browser so timing is millisecond-accurate)
@@ -1406,22 +1367,8 @@ def step_header(number, title, description):
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
-def apply_preset():
-    preset = PRESETS.get(st.session_state.get("preset_choice"))
-    if preset:
-        st.session_state["pid"] = preset["pid"]
-        st.session_state["age"] = preset["age"]
-        st.session_state["edu"] = preset["edu"]
-        st.session_state["vasc"] = preset["vasc"]
-
-
-def load_preset_b():
-    st.session_state["preset_choice"] = PRESET_B
-    apply_preset()
-
-
 def render_sidebar():
-    defaults = {"pid": "KZ-2026-9042", "age": 68, "edu": 12, "vasc": "No", "preset_choice": LIVE_LABEL}
+    defaults = {"pid": "KZ-2026-9042", "age": 68, "edu": 12, "vasc": "No"}
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
 
@@ -1431,14 +1378,8 @@ def render_sidebar():
         st.slider("Age (years)", 45, 85, key="age")
         st.slider("Years of formal education", 4, 20, key="edu")
         st.radio("Vascular risk / hypertension", ["No", "Yes"], horizontal=True, key="vasc")
-        st.selectbox(
-            "Demo patient preset",
-            [LIVE_LABEL, PRESET_A, PRESET_B, PRESET_C],
-            key="preset_choice",
-            on_change=apply_preset,
-        )
         st.caption(f"Age-matched normative cohort: {cohort_for_age(st.session_state['age'])}")
-        st.caption("Presets load a recorded touch-test session. The speech analysis is separate and always uses a new recording.")
+        st.caption("The same criteria apply to every patient: results are compared with the age-matched cohort. The touch test and the speech analysis are separate and each uses its own live recording.")
         with st.expander("AI chat (optional)"):
             st.text_input("Anthropic API key", type="password", key="anthropic_key",
                           help="Enables fuller answers in the results chat. You can also set ANTHROPIC_API_KEY in "
@@ -1449,7 +1390,6 @@ def render_sidebar():
         "age": int(st.session_state["age"]),
         "edu": int(st.session_state["edu"]),
         "vasc_yes": st.session_state["vasc"] == "Yes",
-        "preset": st.session_state["preset_choice"],
     }
 
 
@@ -1479,17 +1419,13 @@ def render_step1(ctx):
         "Three short tasks record initiation latency in milliseconds, hesitation pauses above 1.0 second, "
         "stroke velocity in mm/s and path deviation, all timed in the browser.",
     )
-    if ctx["preset"] != LIVE_LABEL:
-        st.info("A demo preset is loaded, so the dashboard shows its recorded session. "
-                "Choose “Select Custom / Live Test” in the sidebar to analyse your own run of the task.")
-
     try:
         component = get_task_component()
         payload = component(key="nc_task", default=None)
     except Exception as exc:
         payload = None
-        st.warning("The interactive task could not load in this browser, so the demo presets are the way to "
-                   f"present. Details: {exc}")
+        st.warning("The interactive task could not load in this browser. Please reload the page or try another "
+                   f"browser. Details: {exc}")
 
     if isinstance(payload, dict):
         if payload.get("reset"):
@@ -1503,8 +1439,6 @@ def render_step1(ctx):
 
 
 def resolve_raw(ctx):
-    if ctx["preset"] in PRESETS:
-        return PRESETS[ctx["preset"]]["raw"]
     return st.session_state.get("live_raw")
 
 
@@ -2183,7 +2117,7 @@ def safe_section(label, func, *args):
         func(*args)
     except Exception as exc:
         st.error(f"{label} could not be displayed ({type(exc).__name__}: {exc}). "
-                 "The rest of the dashboard is unaffected. Try a demo preset from the sidebar.")
+                 "The rest of the dashboard is unaffected. Try running the task again.")
 
 
 # ---------------------------------------------------------------------------
@@ -2194,9 +2128,7 @@ def render_touch_tab(ctx):
 
     raw = resolve_raw(ctx)
     if raw is None:
-        st.info("Complete the three tasks above and the analysis appears here. "
-                "To preview the dashboard right away, load a demo patient.")
-        st.button("Load Preset B demo (early MCI)", on_click=load_preset_b)
+        st.info("Complete the three tasks above and the touch-test analysis appears here.")
         return
 
     try:
@@ -2208,8 +2140,7 @@ def render_touch_tab(ctx):
         A = analyze(raw, ctx["age"], ctx["edu"], ctx["vasc_yes"], model)
     except Exception as exc:
         st.error(f"The session data could not be analysed ({type(exc).__name__}: {exc}). "
-                 "Run the task again or choose a demo preset.")
-        st.button("Load Preset B demo (early MCI)", on_click=load_preset_b, key="fallback_preset")
+                 "Please run the task again.")
         return
 
     safe_section("Capture log", render_capture_log, A)
@@ -2241,6 +2172,6 @@ def main():
 try:
     main()
 except Exception as fatal:  # last-resort guard so a live presentation never shows a raw traceback
-    st.error(f"Something went wrong ({type(fatal).__name__}: {fatal}). Reload the page and pick a demo preset.")
+    st.error(f"Something went wrong ({type(fatal).__name__}: {fatal}). Reload the page and try again.")
     with st.expander("Technical details"):
         st.code(traceback.format_exc())
