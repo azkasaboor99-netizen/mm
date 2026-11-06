@@ -8,10 +8,10 @@ hesitation pauses, stroke velocity, path deviation and recall.
 Run locally:   streamlit run app.py
 Dependencies:  streamlit, plotly, numpy, pandas, scikit-learn, scipy  (see requirements.txt)
 
-Two capture channels feed one report:
-  - touch task (browser-timed): initiation latency, hesitation pauses, stroke velocity, path deviation
-  - voice (microphone or WAV): sustained-vowel phonation (jitter, shimmer, HNR) and reading-passage
-    speech timing (articulation rate, hesitation pause ratio), combined into a Vocal Biomarker Z-Score
+Two independent analyses, each in its own tab. Either can be used without the other:
+  - Touch-screen test (browser-timed): initiation latency, hesitation pauses, stroke velocity, path deviation
+  - Speech analysis (microphone or WAV): reading-passage articulation rate and hesitation pause ratio,
+    plus sustained-vowel jitter, shimmer and HNR, combined into a Vocal Biomarker Z-Score
 
 Research prototype for demonstration. Not a medical device and not a diagnostic tool.
 """
@@ -890,108 +890,6 @@ def analyze_reading(data):
     }
 
 
-# ---------------------------------------------------------------------------
-# Synthetic audio for the demo presets (processed by the same pipeline as live audio)
-# ---------------------------------------------------------------------------
-def _resonator(x, fs, f, bw):
-    r = math.exp(-math.pi * bw / fs)
-    th = 2.0 * math.pi * f / fs
-    a = [1.0, -2.0 * r * math.cos(th), r * r]
-    return sps.lfilter([sum(a)], a, x)
-
-
-def synth_vowel(fs=44100, dur=5.0, f0=120.0, jitter=0.4, shimmer=2.0, hnr=22.0, seed=1):
-    rng = np.random.default_rng(seed)
-    n = int(dur * fs)
-    lead, tail = 0.35, 0.3
-    sj, ss = jitter / 100.0 / 1.128, shimmer / 100.0 / 1.128
-    times, amps = [], []
-    t = lead
-    while t < dur - tail:
-        period = (1.0 / f0) * float(np.clip(1.0 + sj * rng.standard_normal(), 0.7, 1.3))
-        times.append(t)
-        amps.append(max(0.3, 1.0 + ss * rng.standard_normal()))
-        t += period
-    pos = np.array(times) * fs
-    idx = np.floor(pos).astype(int)
-    frac = pos - idx
-    imp = np.zeros(n + 2)
-    np.add.at(imp, idx, np.array(amps) * (1.0 - frac))
-    np.add.at(imp, idx + 1, np.array(amps) * frac)
-    sig = sps.lfilter([1.0], [1.0, -0.95], imp)
-    for f, bw in [(750, 90), (1200, 110), (2600, 170), (3500, 250)]:
-        sig = _resonator(sig, fs, f, bw)
-    sig = sig[:n]
-    env = np.zeros(n)
-    i0, i1 = int(lead * fs), int((dur - tail) * fs)
-    env[i0:i1] = 1.0
-    fade = int(0.04 * fs)
-    env[i0:i0 + fade] = np.linspace(0, 1, fade)
-    env[i1 - fade:i1] = np.linspace(1, 0, fade)
-    sig = sig * env
-    power = float(np.mean(sig[i0:i1] ** 2))
-    noise = rng.standard_normal(n) * math.sqrt(power / 10 ** (hnr / 10.0)) * env
-    out = sig + noise
-    out = out / np.max(np.abs(out)) * 0.6
-    out = out + rng.standard_normal(n) * 0.0012
-    return out
-
-
-def synth_reading(fs=16000, rate=5.0, gaps=None, f0=120.0, seed=2, n_syll=PASSAGE_SYLLABLES):
-    rng = np.random.default_rng(seed)
-    gaps = dict(gaps or {})
-    slot = 1.0 / rate
-    vowels = [(730, 1090), (530, 1840), (270, 2290), (570, 840), (300, 870)]
-    pieces = [np.zeros(int(0.5 * fs))]
-    for i in range(n_syll):
-        dur = 0.8 * slot
-        m = int(dur * fs)
-        t = np.arange(m) / fs
-        f1, f2 = vowels[int(rng.integers(len(vowels)))]
-        f1 *= 1.0 + 0.06 * rng.standard_normal()
-        f2 *= 1.0 + 0.06 * rng.standard_normal()
-        f0_i = f0 * (1.05 - 0.0015 * i + 0.03 * rng.standard_normal())
-        f0t = f0_i * (1.0 - 0.06 * t / dur)
-        phase = 2.0 * np.pi * np.cumsum(f0t) / fs
-        k = np.arange(1, int(min(4800.0 / f0_i, 40)) + 1)[:, None]
-        fk = k * f0_i
-        gain = np.exp(-0.5 * ((fk - f1) / 180.0) ** 2) + 0.7 * np.exp(-0.5 * ((fk - f2) / 250.0) ** 2) + 0.04
-        burst = (gain / k ** 0.8 * np.sin(k * phase[None, :])).sum(axis=0)
-        burst = burst / max(np.sqrt(np.mean(burst ** 2)), 1e-9)
-        burst = burst * np.sin(np.pi * t / dur) ** 2
-        pieces.append(burst)
-        pieces.append(np.zeros(int((slot - dur) * fs)))
-        if i in gaps:
-            pieces.append(np.zeros(int(gaps[i] * fs)))
-    pieces.append(np.zeros(int(0.5 * fs)))
-    x = np.concatenate(pieces)
-    x = x / np.max(np.abs(x)) * 0.5
-    return x + rng.standard_normal(len(x)) * 0.0012
-
-
-def to_wav_bytes(x, fs):
-    buf = io.BytesIO()
-    wavfile.write(buf, int(fs), (np.clip(x, -1, 1) * 32767).astype(np.int16))
-    return buf.getvalue()
-
-# Demo voice profiles. Audio is synthesised from these settings and then analysed by exactly the
-# same code as a live recording.
-PRESET_VOICE = {
-    PRESET_A: {
-        "vowel": dict(f0=125.0, jitter=0.35, shimmer=2.0, hnr=23.0, seed=11),
-        "reading": dict(rate=5.6, gaps={14: 0.2, 35: 0.2}, f0=122.0, seed=12),
-    },
-    PRESET_B: {
-        "vowel": dict(f0=118.0, jitter=0.45, shimmer=2.5, hnr=22.0, seed=21),
-        "reading": dict(rate=4.0, gaps={6: 0.95, 14: 0.2, 19: 1.25, 28: 0.85, 35: 0.2, 41: 1.35}, f0=116.0, seed=22),
-    },
-    PRESET_C: {
-        "vowel": dict(f0=108.0, jitter=1.2, shimmer=4.8, hnr=15.0, seed=31),
-        "reading": dict(rate=3.8, gaps={14: 0.8, 30: 0.85, 35: 0.2, 42: 0.8}, f0=106.0, seed=32),
-    },
-}
-
-
 @st.cache_data(show_spinner=False, max_entries=6)
 def cached_vowel(data):
     return analyze_vowel(data)
@@ -1000,13 +898,6 @@ def cached_vowel(data):
 @st.cache_data(show_spinner=False, max_entries=6)
 def cached_reading(data):
     return analyze_reading(data)
-
-
-@st.cache_data(show_spinner=False)
-def preset_voice_audio(label):
-    p = PRESET_VOICE[label]
-    return (to_wav_bytes(synth_vowel(fs=44100, **p["vowel"]), 44100),
-            to_wav_bytes(synth_reading(fs=16000, **p["reading"]), 16000))
 
 
 def run_voice(vowel_bytes, reading_bytes):
@@ -1143,7 +1034,7 @@ def score_from_z(z, scale, base=85.0):
     return float(np.clip(base - scale * z, 5.0, 100.0))
 
 
-def analyze(raw, age, edu, vasc_yes, model, voice=None):
+def analyze(raw, age, edu, vasc_yes, model):
     cohort = cohort_for_age(age)
     norms = NORMS[cohort]
 
@@ -1199,11 +1090,6 @@ def analyze(raw, age, edu, vasc_yes, model, voice=None):
 
     tier_z = tier_from_z(z_comp)
     tier_ml = tier_from_prob(risk)
-    z_voc, z_multi, tier_multi = None, None, 0
-    if voice and voice["vz"]["z_voc"] is not None:
-        z_voc = float(voice["vz"]["z_voc"])
-        z_multi = (z_comp + z_voc) / 2.0
-        tier_multi = tier_from_z(z_multi)
     return {
         "cohort": cohort, "norms": norms, "lat": lat, "latencies": latencies,
         "intervals": intervals, "distances": distances, "velocities": velocities,
@@ -1216,8 +1102,7 @@ def analyze(raw, age, edu, vasc_yes, model, voice=None):
         "z_lat": z_lat, "z_pause": z_pause, "z_cv": z_cv, "z_dev": z_dev,
         "z_motor": z_motor, "z_comp": z_comp, "decoupling": decoupling,
         "domains": domains, "risk": risk, "tier_z": tier_z, "tier_ml": tier_ml,
-        "tier_final": max(tier_z, tier_ml, tier_multi), "vasc_yes": vasc_yes,
-        "voice": voice, "z_voc": z_voc, "z_multi": z_multi, "tier_multi": tier_multi,
+        "tier_final": max(tier_z, tier_ml), "vasc_yes": vasc_yes,
     }
 
 
@@ -1257,27 +1142,6 @@ def interpretation_points(A):
             f"**Recall component.** Digit recall was {A['digit_correct']}/{A['digit_length']}. "
             "A working-memory or amnestic contribution cannot be excluded; delayed word recall would help separate it."
         )
-    vz = A["voice"]["vz"] if A["voice"] else None
-    if vz:
-        zph = vz["z_phon"] if vz["phon_used"] else None
-        zli = vz["z_ling"] if vz["ling_used"] else None
-        if zli is not None and zli >= 1 and (zph is None or zph < 1) and zl >= 1:
-            points.append(
-                f"**Cross-modal hesitation.** Slowed, pause-laden speech ({zli:+.1f} SD) appears alongside slowed touch "
-                "initiation, while voice quality itself is preserved. Slowing that shows up in both channels without a "
-                "phonation problem points to planning-level slowing rather than a laryngeal or speech-motor cause."
-            )
-        if zph is not None and zph >= 1.5 and zm >= 1.5:
-            points.append(
-                f"**Shared motor-control signature.** Unstable phonation ({zph:+.1f} SD) and hand path deviation "
-                f"(motor z {zm:+.1f}) occur together, which suggests one underlying motor-control disturbance, for example "
-                "subcortical or vascular, rather than two unrelated problems."
-            )
-        if zph is not None and zph >= 2 and zm < 1 and zl < 1:
-            points.append(
-                f"**Isolated voice abnormality.** Phonation is abnormal ({zph:+.1f} SD) while touch performance is normal. "
-                "Laryngeal, respiratory or smoking-related causes should be considered before attributing this to cognition."
-            )
     if not points and A["tier_final"] >= 1:
         points.append(
             "**Mild process-level slowing without a dominant pattern.** This can reflect early cognitive change, "
@@ -1362,26 +1226,6 @@ def build_audit(A, ctx):
     )
     extras = f"{A['errors']} wrong tap(s), {A['false_starts']} anticipatory tap(s), digit recall {A['digit_correct']}/{A['digit_length']}."
     lines.append(f"- **Accuracy:** {extras}")
-    voice = A["voice"]
-    if voice:
-        vv, vzs = voice["V"], voice["vz"]
-        vow, rd = vv.get("vowel"), vv.get("reading")
-        if vow:
-            lines.append(
-                f"- **Sustained vowel (phonation):** jitter {vow['jitter']:.2f}% ({vzs['z_jit']:+.1f} SD), "
-                f"shimmer {vow['shimmer']:.2f}% ({vzs['z_shim']:+.1f} SD), HNR {vow['hnr']:.1f} dB "
-                f"({vzs['z_hnr']:+.1f} SD), median F0 {vow['f0_hz']:.0f} Hz."
-                + ("" if vzs["phon_used"] else " Excluded from scoring because of recording quality.")
-            )
-        if rd:
-            lines.append(
-                f"- **Reading passage (speech timing):** articulation rate {rd['art_rate']:.1f} syllables/s "
-                f"({vzs['z_rate']:+.1f} SD) and a hesitation pause ratio of {100 * rd['pause_ratio']:.0f}% "
-                f"({vzs['z_vpause']:+.1f} SD), with {rd['n_pauses']} silent gap(s) longer than {PAUSE_MIN_S:.1f} s."
-                + ("" if vzs["ling_used"] else " Excluded from scoring because of recording quality.")
-            )
-            for k, (start, gap) in enumerate(rd["pauses"][:6], start=1):
-                lines.append(f"    - Speech pause {k}: {gap:.2f} s of silence starting {start:.1f} s into the reading.")
     lines.append("")
     lines.append("#### 2. Why this score was generated")
     drivers = sorted(
@@ -1404,12 +1248,6 @@ def build_audit(A, ctx):
         lines.append(
             f"The two engines land in different bands ({TIERS[A['tier_z']]['name']} by Z-score, "
             f"{TIERS[A['tier_ml']]['name']} by model), so the higher band is shown as the alert level."
-        )
-    if A["z_voc"] is not None:
-        lines.append(
-            f"The Vocal Biomarker Z-Score is {A['z_voc']:+.1f} SD (the average of the phonation and speech-timing "
-            f"branches that passed the quality check). Averaged with the touch composite it gives a multimodal "
-            f"deviation of {A['z_multi']:+.1f} SD."
         )
     lines.append("")
     lines.append("#### 3. Differential clinical interpretation")
@@ -1459,21 +1297,24 @@ def radar_figure(A):
     return fig
 
 
-SPEC_SCALE = [[0.0, "#FFFFFF"], [0.35, "#BFD5EA"], [0.7, "#3F78B5"], [1.0, "#0F2A44"]]
-
-
-def _band_figure(rows, height):
-    """Horizontal z-score bars over the green / amber / red risk bands. rows = (label, z, text)."""
+def zbar_figure(A):
+    rows = [
+        ("Initiation latency", A["z_lat"], f"{A['lat']:.0f} ms"),
+        ("Hesitation pauses", A["z_pause"], f"{A['n_pauses']} pauses"),
+        ("Velocity variability", A["z_cv"], f"{A['vel_cv']:.0f}% CV"),
+        ("Path deviation", A["z_dev"], f"{A['dev']:.1f} mm"),
+    ]
     labels = [r[0] for r in rows]
     zs = [r[1] for r in rows]
     colors = [TIERS[tier_from_z(z)]["color"] for z in zs]
+    texts = [f"{r[2]}  ({r[1]:+.1f} SD)" for r in rows]
     fig = go.Figure(go.Bar(
-        x=zs, y=labels, orientation="h", marker_color=colors, text=[r[2] for r in rows],
-        textposition="outside", cliponaxis=False, hovertemplate="%{y}: %{x:+.2f} SD<extra></extra>",
+        x=zs, y=labels, orientation="h", marker_color=colors, text=texts, textposition="outside",
+        cliponaxis=False, hovertemplate="%{y}: %{x:+.2f} SD<extra></extra>",
     ))
     fig.add_vrect(x0=-1, x1=1, fillcolor=GREEN, opacity=0.14, line_width=0, layer="below")
     fig.add_vrect(x0=1, x1=2, fillcolor=AMBER, opacity=0.16, line_width=0, layer="below")
-    fig.add_vrect(x0=2, x1=9.5, fillcolor=RED, opacity=0.08, line_width=0, layer="below")
+    fig.add_vrect(x0=2, x1=7.5, fillcolor=RED, opacity=0.08, line_width=0, layer="below")
     for x, text in [(0, "Normal control band"), (1.5, "1 to 2 SD"), (4.7, "2 SD or more: alert")]:
         fig.add_annotation(x=x, y=1.0, yref="paper", yanchor="bottom", text=text, showarrow=False,
                            font=dict(size=11, color=MUTED))
@@ -1482,104 +1323,9 @@ def _band_figure(rows, height):
         font=FONT, paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF", showlegend=False,
         xaxis=dict(title="Standard deviations from the age-adjusted normal control mean",
                    range=[-3.5, 9.5], zeroline=False, gridcolor=LINE),
-        yaxis=dict(autorange="reversed", gridcolor=LINE, automargin=True),
-        margin=dict(l=10, r=10, t=40, b=50), height=height,
+        yaxis=dict(autorange="reversed", gridcolor=LINE),
+        margin=dict(l=10, r=10, t=40, b=50), height=420,
     )
-    return fig
-
-
-def zbar_figure(A):
-    rows = [
-        ("Initiation latency", A["z_lat"], f"{A['lat']:.0f} ms  ({A['z_lat']:+.1f} SD)"),
-        ("Hesitation pauses", A["z_pause"], f"{A['n_pauses']} pauses  ({A['z_pause']:+.1f} SD)"),
-        ("Velocity variability", A["z_cv"], f"{A['vel_cv']:.0f}% CV  ({A['z_cv']:+.1f} SD)"),
-        ("Path deviation", A["z_dev"], f"{A['dev']:.1f} mm  ({A['z_dev']:+.1f} SD)"),
-    ]
-    return _band_figure(rows, 420)
-
-
-def multimodal_figure(A):
-    rows = [
-        ("Touch: initiation latency", A["z_lat"], f"{A['lat']:.0f} ms  ({A['z_lat']:+.1f} SD)"),
-        ("Touch: hesitation pauses", A["z_pause"], f"{A['n_pauses']} pauses  ({A['z_pause']:+.1f} SD)"),
-    ]
-    if A["voice"]:
-        vz = A["voice"]["vz"]
-        if vz["z_phon"] is not None:
-            tag = "" if vz["phon_used"] else " (excluded)"
-            rows.append((f"Voice: phonation{tag}", vz["z_phon"], f"{vz['z_phon']:+.1f} SD"))
-        if vz["z_ling"] is not None:
-            tag = "" if vz["ling_used"] else " (excluded)"
-            rows.append((f"Voice: speech timing{tag}", vz["z_ling"], f"{vz['z_ling']:+.1f} SD"))
-    if A["z_voc"] is not None:
-        rows.append(("Vocal Biomarker Z-Score", A["z_voc"], f"{A['z_voc']:+.1f} SD"))
-        rows.append(("Multimodal Z (touch + voice)", A["z_multi"], f"{A['z_multi']:+.1f} SD"))
-    return _band_figure(rows, 90 + 50 * len(rows))
-
-
-def latency_figure(A):
-    mean, sd = A["norms"]["latency_ms"]
-    trials = [float(v) for v in A["latencies"]]
-    labels = [f"Trial {i + 1}" for i in range(len(trials))]
-    colors = [TIERS[tier_from_z((v - mean) / sd)]["color"] for v in trials]
-    top = max(max(trials) * 1.25, mean + 2.6 * sd)
-    fig = go.Figure(go.Bar(
-        x=labels, y=trials, marker_color=colors, text=[f"{v:.0f} ms" for v in trials], textposition="outside",
-        cliponaxis=False, hovertemplate="%{x}: %{y:.0f} ms<extra></extra>",
-    ))
-    fig.add_hrect(y0=mean - sd, y1=mean + sd, fillcolor=GREEN, opacity=0.15, line_width=0, layer="below")
-    fig.add_hrect(y0=mean + sd, y1=mean + 2 * sd, fillcolor=AMBER, opacity=0.18, line_width=0, layer="below")
-    fig.add_hrect(y0=mean + 2 * sd, y1=top * 2, fillcolor=RED, opacity=0.07, line_width=0, layer="below")
-    fig.add_hline(y=mean, line_dash="dot", line_color=INK, line_width=1,
-                  annotation_text=f"Cohort mean {mean:.0f} ms", annotation_position="bottom right",
-                  annotation_font=dict(size=11, color=INK))
-    fig.update_layout(
-        font=FONT, paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF", showlegend=False,
-        yaxis=dict(title="Initiation latency (ms)", range=[0, top], gridcolor=LINE),
-        xaxis=dict(title="Reaction trial"),
-        margin=dict(l=10, r=10, t=20, b=50), height=420,
-    )
-    return fig
-
-
-def spectrogram_figure(V):
-    items = []
-    if V.get("vowel"):
-        items.append(("vowel", "Sustained vowel 'Ahhh'"))
-    if V.get("reading"):
-        items.append(("reading", "Reading passage"))
-    if not items:
-        return None
-    fig = make_subplots(rows=len(items), cols=1, subplot_titles=[t for _, t in items], vertical_spacing=0.18)
-    for row, (key, _) in enumerate(items, start=1):
-        data = V[key]
-        spec = data["spec"]
-        top = float(np.max(spec["db"]))
-        fig.add_trace(go.Heatmap(
-            x=spec["t"], y=spec["f"], z=spec["db"], zmin=top - 60, zmax=top, colorscale=SPEC_SCALE,
-            showscale=(row == 1), colorbar=dict(title="dB", thickness=10, len=0.8),
-            hovertemplate="%{x:.2f} s, %{y:.0f} Hz, %{z:.0f} dB<extra></extra>",
-        ), row=row, col=1)
-        if key == "vowel":
-            f_t, f_hz = data["f0_track"]
-            fig.add_trace(go.Scatter(x=f_t, y=f_hz, mode="lines", line=dict(color=AMBER, width=2),
-                                     showlegend=False, hovertemplate="F0 %{y:.0f} Hz<extra></extra>"),
-                          row=row, col=1)
-            fig.add_vrect(x0=data["window"][0], x1=data["window"][1], line_width=1.5, line_dash="dash",
-                          line_color=AMBER, fillcolor="rgba(0,0,0,0)", row=row, col=1)
-        else:
-            for start, gap in data["pauses"]:
-                fig.add_vrect(x0=start, x1=start + gap, fillcolor=RED, opacity=0.28, line_width=0,
-                              annotation_text=f"{gap:.1f} s", annotation_position="top left",
-                              annotation_font=dict(size=10, color=RED), row=row, col=1)
-            nuclei = data["nuclei_t"]
-            fig.add_trace(go.Scatter(x=nuclei, y=[4750] * len(nuclei), mode="markers",
-                                     marker=dict(symbol="triangle-down", size=5, color=INK), showlegend=False,
-                                     hovertemplate="Syllable at %{x:.2f} s<extra></extra>"), row=row, col=1)
-        fig.update_xaxes(title_text="Time (s)", row=row, col=1)
-        fig.update_yaxes(title_text="Frequency (Hz)", range=[0, 5000], row=row, col=1)
-    fig.update_layout(font=FONT, paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF",
-                      margin=dict(l=10, r=10, t=40, b=40), height=250 * len(items) + 90)
     return fig
 
 
@@ -1690,7 +1436,7 @@ def render_sidebar():
             on_change=apply_preset,
         )
         st.caption(f"Age-matched normative cohort: {cohort_for_age(st.session_state['age'])}")
-        st.caption("Presets load a recorded session. Choose the live option to analyse your own run of the task.")
+        st.caption("Presets load a recorded touch-test session. The speech analysis is separate and always uses a new recording.")
 
     return {
         "pid": st.session_state["pid"].strip() or "Unnamed patient",
@@ -1728,7 +1474,7 @@ def render_step1(ctx):
         "stroke velocity in mm/s and path deviation, all timed in the browser.",
     )
     if ctx["preset"] != LIVE_LABEL:
-        st.info("A demo preset is loaded, so the dashboard shows its recorded touch and voice session. "
+        st.info("A demo preset is loaded, so the dashboard shows its recorded session. "
                 "Choose “Select Custom / Live Test” in the sidebar to analyse your own run of the task.")
 
     try:
@@ -1748,149 +1494,6 @@ def render_step1(ctx):
             except Exception as exc:
                 st.warning(f"That capture was discarded because it looked invalid ({exc}). Please run the task again.")
                 st.session_state.pop("live_raw", None)
-
-
-def capture_audio(label, key, rate):
-    """Microphone recorder with a WAV-upload fallback. Returns WAV bytes or None."""
-    data = None
-    if hasattr(st, "audio_input"):
-        try:
-            recorded = st.audio_input(label, sample_rate=rate, key=key)
-        except TypeError:
-            recorded = st.audio_input(label, key=key)
-        if recorded is not None:
-            data = recorded.getvalue()
-    else:
-        st.caption("Microphone recording needs Streamlit 1.39 or newer. Upload a WAV file instead.")
-    with st.expander("Upload a WAV file instead"):
-        uploaded = st.file_uploader("WAV file", type=["wav"], key=key + "_upload", label_visibility="collapsed")
-        if uploaded is not None:
-            data = uploaded.getvalue()
-    return data
-
-
-def _voice_band(z, used):
-    if not used:
-        return ('<span class="nc-badge" style="background:#EEF2F5;color:#5A6F82;border:1px solid #D5DFE8">'
-                "Excluded</span>")
-    tier = tier_from_z(z)
-    return badge(tier, {0: "Low", 1: "Borderline", 2: "Alert"}[tier])
-
-
-def render_voice_results(V, vz):
-    norms = vz["norms"]
-    left, right = st.columns(2, gap="large")
-    with left:
-        st.markdown("**Acoustic Phonation Analyzer**")
-        vow = V.get("vowel")
-        if vow:
-            used = vz["phon_used"]
-            rows = [
-                ["Jitter (local)", f"{vow['jitter']:.2f}%", f"{norms['jitter'][0]:.2f} ± {norms['jitter'][1]:.2f}",
-                 f"{vz['z_jit']:+.1f}", _voice_band(vz["z_jit"], used)],
-                ["Shimmer (local)", f"{vow['shimmer']:.2f}%", f"{norms['shimmer'][0]:.1f} ± {norms['shimmer'][1]:.1f}",
-                 f"{vz['z_shim']:+.1f}", _voice_band(vz["z_shim"], used)],
-                ["Harmonic-to-noise ratio", f"{vow['hnr']:.1f} dB", f"{norms['hnr'][0]:.1f} ± {norms['hnr'][1]:.1f}",
-                 f"{vz['z_hnr']:+.1f}", _voice_band(vz["z_hnr"], used)],
-            ]
-            st.markdown(html_table(["Metric", "Patient", "Cohort", "Z", "Band"], rows), unsafe_allow_html=True)
-            st.markdown(
-                f'<div class="nc-note">Median pitch {vow["f0_hz"]:.0f} Hz, {vow["n_cycles"]} vocal cycles analysed '
-                f'from the steady middle of the vowel. Cut-offs often cited for jitter and shimmer are about 1.04% '
-                f'and 3.81%.</div>', unsafe_allow_html=True)
-            for note in vow["quality"]["notes"]:
-                st.warning(note)
-        else:
-            st.caption("No usable vowel recording yet.")
-    with right:
-        st.markdown("**Linguistic Temporal Analyzer**")
-        rd = V.get("reading")
-        if rd:
-            used = vz["ling_used"]
-            pm, ps = norms["pause_ratio"]
-            rows = [
-                ["Articulation rate", f"{rd['art_rate']:.1f} syll/s",
-                 f"{norms['art_rate'][0]:.1f} ± {norms['art_rate'][1]:.1f}", f"{vz['z_rate']:+.1f}",
-                 _voice_band(vz["z_rate"], used)],
-                ["Hesitation pause ratio", f"{100 * rd['pause_ratio']:.0f}%", f"{100 * pm:.0f} ± {100 * ps:.0f}%",
-                 f"{vz['z_vpause']:+.1f}", _voice_band(vz["z_vpause"], used)],
-            ]
-            st.markdown(html_table(["Metric", "Patient", "Cohort", "Z", "Band"], rows), unsafe_allow_html=True)
-            st.markdown(
-                f'<div class="nc-note">{rd["n_pauses"]} silent gap(s) over {PAUSE_MIN_S:.1f} s, {rd["pause_total_s"]:.1f} s '
-                f'in total. {rd["n_syllables"]} of {PASSAGE_SYLLABLES} syllables detected; the rate uses the '
-                f'{esc(rd["rate_basis"])}.</div>', unsafe_allow_html=True)
-            for note in rd["quality"]["notes"]:
-                st.warning(note)
-        else:
-            st.caption("No usable reading recording yet.")
-
-    if vz["z_voc"] is not None:
-        tier = TIERS[vz["tier_voc"]]
-        parts = []
-        if vz["phon_used"]:
-            parts.append(f"phonation {vz['z_phon']:+.1f} SD")
-        if vz["ling_used"]:
-            parts.append(f"speech timing {vz['z_ling']:+.1f} SD")
-        st.markdown(
-            f'<div class="nc-banner" style="background:{tier["bg"]};border-left-color:{tier["color"]}">'
-            f'<div class="t" style="color:{tier["fg"]}">{tier["icon"]} Vocal Biomarker Z-Score: {vz["z_voc"]:+.1f} SD</div>'
-            f'<div class="d">{esc(tier["name"])}. Average of {" and ".join(parts)}, each branch weighted equally.</div></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.info("The Vocal Biomarker Z-Score appears once at least one recording passes the quality check.")
-
-    with st.expander("Voice normative baseline matrix"):
-        rows = [[c, f"{v['jitter'][0]:.2f} ± {v['jitter'][1]:.2f}", f"{v['shimmer'][0]:.1f} ± {v['shimmer'][1]:.1f}",
-                 f"{v['hnr'][0]:.1f} ± {v['hnr'][1]:.1f}", f"{v['art_rate'][0]:.1f} ± {v['art_rate'][1]:.1f}",
-                 f"{100 * v['pause_ratio'][0]:.0f} ± {100 * v['pause_ratio'][1]:.0f}"] for c, v in VOICE_NORMS.items()]
-        active = [c == cohort_for_age(int(st.session_state.get("age", 68))) for c, *_ in rows]
-        st.markdown(html_table(["Age cohort", "Jitter (%)", "Shimmer (%)", "HNR (dB)", "Articulation rate (syll/s)",
-                                "Pause ratio (%)"], rows, active), unsafe_allow_html=True)
-        st.markdown('<div class="nc-note">Mean ± SD. Prototype reference values for demonstration; they need validation '
-                    "against recordings from a clinical cohort made with the same microphone setup.</div>",
-                    unsafe_allow_html=True)
-
-
-def render_voice_step(ctx):
-    step_header(
-        2, "Voice biomarker analysis",
-        "Two branches: a sustained 'Ahhh' measures voice stability, and a short reading measures speech timing. "
-        "Both are combined into one Vocal Biomarker Z-Score.",
-    )
-    if ctx["preset"] in PRESET_VOICE:
-        vowel_bytes, reading_bytes = preset_voice_audio(ctx["preset"])
-        st.info("Demo preset: this audio is synthetic, generated for the patient profile and analysed by the same "
-                "pipeline as a live recording.")
-        c1, c2 = st.columns(2, gap="large")
-        c1.markdown("**Sustained vowel (about 5 s)**")
-        c1.audio(vowel_bytes, format="audio/wav")
-        c2.markdown("**Reading passage**")
-        c2.audio(reading_bytes, format="audio/wav")
-    else:
-        c1, c2 = st.columns(2, gap="large")
-        with c1:
-            st.markdown("**Branch 1: sustained vowel**")
-            st.caption("Sit upright, hold the device about 20 cm away, take a breath and say “Ahhh” at a steady, "
-                       "comfortable pitch and loudness for about 5 seconds.")
-            vowel_bytes = capture_audio("Record the sustained vowel", "voice_vowel", 44100)
-        with c2:
-            st.markdown("**Branch 2: reading passage**")
-            with st.container(border=True):
-                st.markdown(PASSAGE)
-            reading_bytes = capture_audio("Record yourself reading the passage", "voice_reading", 16000)
-        if not vowel_bytes and not reading_bytes:
-            st.caption("Voice is optional. Without a recording the report uses the touch task alone.")
-
-    V = run_voice(vowel_bytes, reading_bytes)
-    for key, label in (("vowel", "Vowel recording"), ("reading", "Reading recording")):
-        if key in V["errors"]:
-            st.warning(f"{label}: {V['errors'][key]}")
-    vz = voice_zscores(V, ctx["age"])
-    if V["vowel"] or V["reading"]:
-        render_voice_results(V, vz)
-    return V, vz
 
 
 def resolve_raw(ctx):
@@ -1921,7 +1524,7 @@ def render_capture_log(A):
 
 def render_step2(A, ctx, model, n_train):
     step_header(
-        3, "Normative comparison and Z-score engine",
+        2, "Normative comparison and Z-score engine",
         "Each metric is compared with people of the same age group. A Random Forest trained on the fly adds an "
         "Early MCI risk probability.",
     )
@@ -1971,13 +1574,6 @@ def render_step2(A, ctx, model, n_train):
             tier = tier_from_z(z)
             short = {0: "Low", 1: "Borderline", 2: "Alert"}[tier]
             rows.append([name, value, f"{fmt.format(mean)} ± {fmt.format(sd)}", f"{z:+.1f}", badge(tier, short)])
-        if A["voice"]:
-            vzs = A["voice"]["vz"]
-            for label, z, used in (("Voice: phonation branch", vzs["z_phon"], vzs["phon_used"]),
-                                   ("Voice: speech-timing branch", vzs["z_ling"], vzs["ling_used"]),
-                                   ("Vocal Biomarker Z-Score", vzs["z_voc"], True)):
-                if z is not None:
-                    rows.append([label, "", "", f"{z:+.1f}", _voice_band(z, used)])
         st.markdown(html_table(["Metric", "Patient", "Cohort", "Z", "Band"], rows), unsafe_allow_html=True)
         st.markdown(
             '<div class="nc-note">Z below 1.0 SD is low risk, 1.0 to 2.0 SD is borderline, and 2.0 SD or more raises '
@@ -1986,10 +1582,6 @@ def render_step2(A, ctx, model, n_train):
         )
 
     final = TIERS[A["tier_final"]]
-    voice_sentence = ""
-    if A["z_voc"] is not None:
-        voice_sentence = (f"Vocal Biomarker Z-Score {A['z_voc']:+.1f} SD, multimodal deviation {A['z_multi']:+.1f} SD "
-                          f"({esc(TIERS[A['tier_multi']]['name'])}). ")
     messages = {
         0: "Process metrics sit inside the age-adjusted control range.",
         1: "Some process metrics show mild decay compared with the age-matched control group.",
@@ -2000,7 +1592,7 @@ def render_step2(A, ctx, model, n_train):
         f'<div class="t" style="color:{final["fg"]}">{final["icon"]} {esc(final["name"])}</div>'
         f'<div class="d">{esc(messages[A["tier_final"]])} Overall deviation {A["z_comp"]:+.1f} SD '
         f'({esc(TIERS[A["tier_z"]]["name"])}), model risk {A["risk"]:.0f}% ({esc(TIERS[A["tier_ml"]]["name"])}). '
-        f"{voice_sentence}The alert level is the highest of the available engines.</div></div>",
+        "The alert level is the higher of the two.</div></div>",
         unsafe_allow_html=True,
     )
     ml_color = TIERS[A["tier_ml"]]["color"]
@@ -2016,22 +1608,17 @@ def render_step2(A, ctx, model, n_train):
 
 def render_step3(A):
     step_header(
-        4, "Clinical diagnostic dashboard",
+        3, "Clinical diagnostic dashboard",
         "Key results first, then performance across five clinical domains and against the age-adjusted control band.",
     )
     z_tier = TIERS[A["tier_z"]]["name"]
     lat_mean = A["norms"]["latency_ms"][0]
     p_mean = A["norms"]["pauses"][0]
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Risk Score", f"{A['risk']:.0f}%", delta=TIERS[A["tier_ml"]]["name"], delta_color="off")
     c2.metric("Mean Latency", f"{A['lat']:.0f} ms", delta=f"{A['lat'] - lat_mean:+.0f} ms vs cohort", delta_color="inverse")
     c3.metric("Hesitation Pauses", f"{A['n_pauses']}", delta=f"{A['n_pauses'] - p_mean:+.1f} vs cohort", delta_color="inverse")
     c4.metric("Z-Score Deviation", f"{A['z_comp']:+.1f} SD", delta=z_tier, delta_color="off")
-    if A["z_voc"] is not None:
-        c5.metric("Vocal Biomarker Z", f"{A['z_voc']:+.1f} SD", delta=TIERS[A["voice"]["vz"]["tier_voc"]]["name"],
-                  delta_color="off")
-    else:
-        c5.metric("Vocal Biomarker Z", "Not recorded", delta="Record voice in Step 2", delta_color="off")
 
     left, right = st.columns(2, gap="large")
     with left:
@@ -2043,37 +1630,10 @@ def render_step3(A):
         show_plot(zbar_figure(A))
         st.caption("Bars to the right of zero are worse than the age-matched mean.")
 
-    render_multimodal(A)
-
-
-def render_multimodal(A):
-    st.markdown("#### Voice spectrogram alongside touch-screen motor latency")
-    V = A["voice"]["V"] if A["voice"] else None
-    left, right = st.columns([1.55, 1], gap="large")
-    with left:
-        st.markdown("**Voice spectrograms**")
-        fig = spectrogram_figure(V) if V else None
-        if fig is None:
-            st.info("No voice recording yet. Record the vowel and the reading passage in Step 2 to see the "
-                    "spectrograms here.")
-        else:
-            show_plot(fig)
-            st.caption("Darker means more energy. Amber line: pitch track, with the dashed box marking the analysed "
-                       "window. Red bands: speech pauses over 0.5 s. Triangles: detected syllables.")
-    with right:
-        st.markdown("**Touch-screen motor latency**")
-        show_plot(latency_figure(A))
-        st.caption("Each bar is one reaction trial. Green is within 1 SD of the age-matched mean, amber 1 to 2 SD, "
-                   "red beyond.")
-    st.markdown("**Multimodal Z-scores: touch and voice together**")
-    show_plot(multimodal_figure(A))
-    st.caption("The multimodal score averages the touch composite (latency and pauses) with the Vocal Biomarker "
-               "Z-Score. Voice branches that fail the recording-quality check are left out.")
-
 
 def render_step4(A, ctx):
     step_header(
-        5, "Automated clinical process report",
+        4, "Automated clinical process report",
         "What happened during the process, and why the score was generated.",
     )
     n_ok = A["errors"] == 0 and A["verbal_ratio"] >= 0.75
@@ -2083,8 +1643,6 @@ def render_step4(A, ctx):
                        f"{A['digit_correct']}/{A['digit_length']}. A paper test would show these end results only.")
     proc_text = (f"{A['n_pauses']} hesitation pause(s), mean initiation latency {A['lat']:.0f} ms "
                  f"({A['z_lat']:+.1f} SD), movement variability {A['vel_cv']:.0f}%.")
-    if A["z_voc"] is not None:
-        proc_text += f" Vocal Biomarker Z-Score {A['z_voc']:+.1f} SD."
     c1, c2 = st.columns(2, gap="large")
     c1.markdown(f'<div class="nc-card"><h4>What a paper test records</h4><p>{esc(paper_text)}</p></div>',
                 unsafe_allow_html=True)
@@ -2099,6 +1657,294 @@ def render_step4(A, ctx):
         st.markdown(build_audit(A, ctx))
 
 
+# ---------------------------------------------------------------------------
+# Speech analysis tab (independent of the touch test)
+# ---------------------------------------------------------------------------
+SPEC_SCALE = [[0.0, "#FFFFFF"], [0.35, "#BFD5EA"], [0.7, "#3F78B5"], [1.0, "#0F2A44"]]
+
+
+def spectrogram_figure(V):
+    items = []
+    if V.get("reading"):
+        items.append(("reading", "Reading passage"))
+    if V.get("vowel"):
+        items.append(("vowel", "Sustained vowel 'Ahhh'"))
+    if not items:
+        return None
+    fig = make_subplots(rows=len(items), cols=1, subplot_titles=[t for _, t in items], vertical_spacing=0.18)
+    for row, (key, _) in enumerate(items, start=1):
+        data = V[key]
+        spec = data["spec"]
+        top = float(np.max(spec["db"]))
+        fig.add_trace(go.Heatmap(
+            x=spec["t"], y=spec["f"], z=spec["db"], zmin=top - 60, zmax=top, colorscale=SPEC_SCALE,
+            showscale=(row == 1), colorbar=dict(title="dB", thickness=10, len=0.8),
+            hovertemplate="%{x:.2f} s, %{y:.0f} Hz, %{z:.0f} dB<extra></extra>",
+        ), row=row, col=1)
+        if key == "vowel":
+            f_t, f_hz = data["f0_track"]
+            fig.add_trace(go.Scatter(x=f_t, y=f_hz, mode="lines", line=dict(color=AMBER, width=2),
+                                     showlegend=False, hovertemplate="F0 %{y:.0f} Hz<extra></extra>"),
+                          row=row, col=1)
+            fig.add_vrect(x0=data["window"][0], x1=data["window"][1], line_width=1.5, line_dash="dash",
+                          line_color=AMBER, fillcolor="rgba(0,0,0,0)", row=row, col=1)
+        else:
+            for start, gap in data["pauses"]:
+                fig.add_vrect(x0=start, x1=start + gap, fillcolor=RED, opacity=0.28, line_width=0,
+                              annotation_text=f"{gap:.1f} s", annotation_position="top left",
+                              annotation_font=dict(size=10, color=RED), row=row, col=1)
+            nuclei = data["nuclei_t"]
+            fig.add_trace(go.Scatter(x=nuclei, y=[4750] * len(nuclei), mode="markers",
+                                     marker=dict(symbol="triangle-down", size=5, color=INK), showlegend=False,
+                                     hovertemplate="Syllable at %{x:.2f} s<extra></extra>"), row=row, col=1)
+        fig.update_xaxes(title_text="Time (s)", row=row, col=1)
+        fig.update_yaxes(title_text="Frequency (Hz)", range=[0, 5000], row=row, col=1)
+    fig.update_layout(font=FONT, paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF",
+                      margin=dict(l=10, r=10, t=40, b=40), height=250 * len(items) + 90)
+    return fig
+
+
+def capture_audio(label, key, rate):
+    """Microphone recorder with a WAV-upload fallback. Returns WAV bytes or None."""
+    data = None
+    if hasattr(st, "audio_input"):
+        try:
+            recorded = st.audio_input(label, sample_rate=rate, key=key)
+        except TypeError:
+            recorded = st.audio_input(label, key=key)
+        if recorded is not None:
+            data = recorded.getvalue()
+    else:
+        st.error("This Streamlit version has no microphone recorder (it needs 1.39 or newer). Update it with "
+                 "pip install -U streamlit, or upload a WAV file below.")
+    with st.expander("Upload a WAV file instead"):
+        uploaded = st.file_uploader("WAV file", type=["wav"], key=key + "_upload", label_visibility="collapsed")
+        if uploaded is not None:
+            data = uploaded.getvalue()
+    return data
+
+
+def _voice_band(z, used):
+    if not used:
+        return ('<span class="nc-badge" style="background:#EEF2F5;color:#5A6F82;border:1px solid #D5DFE8">'
+                "Excluded</span>")
+    tier = tier_from_z(z)
+    return badge(tier, {0: "Low", 1: "Borderline", 2: "Alert"}[tier])
+
+
+def verdict_box(label, z, used, flagged, age):
+    if not used:
+        return ('<div class="nc-banner" style="background:#EEF2F5;border-left-color:#8A9BAB">'
+                f'<div class="t" style="color:#5A6F82">{esc(label)}: not scored</div>'
+                '<div class="d">The recording did not pass the quality check, so it is left out of the score.</div></div>')
+    tier_idx = tier_from_z(z)
+    tier = TIERS[tier_idx]
+    words = {0: f"Normal for age {age}", 1: "Borderline", 2: "Outside the normal range"}[tier_idx]
+    detail = ("Every measure is within the age-matched range." if not flagged
+              else "Raised on: " + ", ".join(flagged) + ".")
+    return (f'<div class="nc-banner" style="background:{tier["bg"]};border-left-color:{tier["color"]}">'
+            f'<div class="t" style="color:{tier["fg"]}">{tier["icon"]} {esc(label)}: {words}</div>'
+            f'<div class="d">{esc(detail)}</div></div>')
+
+
+def render_voice_results(V, vz, age):
+    norms = vz["norms"]
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("**Linguistic Temporal Analyzer (reading passage)**")
+        rd = V.get("reading")
+        if rd:
+            used = vz["ling_used"]
+            pm, ps = norms["pause_ratio"]
+            rows = [
+                ["Articulation rate", f"{rd['art_rate']:.1f} syll/s",
+                 f"{norms['art_rate'][0]:.1f} ± {norms['art_rate'][1]:.1f}", f"{vz['z_rate']:+.1f}",
+                 _voice_band(vz["z_rate"], used)],
+                ["Hesitation pause ratio", f"{100 * rd['pause_ratio']:.0f}%", f"{100 * pm:.0f} ± {100 * ps:.0f}%",
+                 f"{vz['z_vpause']:+.1f}", _voice_band(vz["z_vpause"], used)],
+            ]
+            st.markdown(html_table(["Metric", "Patient", "Cohort", "Z", "Band"], rows), unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="nc-note">{rd["n_pauses"]} silent gap(s) over {PAUSE_MIN_S:.1f} s, {rd["pause_total_s"]:.1f} s '
+                f'in total. {rd["n_syllables"]} of {PASSAGE_SYLLABLES} syllables detected; the rate uses the '
+                f'{esc(rd["rate_basis"])}.</div>', unsafe_allow_html=True)
+            for note in rd["quality"]["notes"]:
+                st.warning(note)
+            flagged = [name for name, key in (("slow articulation rate", "z_rate"),
+                                              ("frequent long pauses", "z_vpause")) if vz[key] >= 1.0]
+            st.markdown(verdict_box("Speech timing", vz["z_ling"], used, flagged, age), unsafe_allow_html=True)
+        else:
+            st.caption("No usable reading recording yet.")
+    with right:
+        st.markdown("**Acoustic Phonation Analyzer (sustained vowel)**")
+        vow = V.get("vowel")
+        if vow:
+            used = vz["phon_used"]
+            rows = [
+                ["Jitter (local)", f"{vow['jitter']:.2f}%", f"{norms['jitter'][0]:.2f} ± {norms['jitter'][1]:.2f}",
+                 f"{vz['z_jit']:+.1f}", _voice_band(vz["z_jit"], used)],
+                ["Shimmer (local)", f"{vow['shimmer']:.2f}%", f"{norms['shimmer'][0]:.1f} ± {norms['shimmer'][1]:.1f}",
+                 f"{vz['z_shim']:+.1f}", _voice_band(vz["z_shim"], used)],
+                ["Harmonic-to-noise ratio", f"{vow['hnr']:.1f} dB", f"{norms['hnr'][0]:.1f} ± {norms['hnr'][1]:.1f}",
+                 f"{vz['z_hnr']:+.1f}", _voice_band(vz["z_hnr"], used)],
+            ]
+            st.markdown(html_table(["Metric", "Patient", "Cohort", "Z", "Band"], rows), unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="nc-note">Median pitch {vow["f0_hz"]:.0f} Hz, {vow["n_cycles"]} vocal cycles analysed '
+                f'from the steady middle of the vowel. Cut-offs often cited for jitter and shimmer are about 1.04% '
+                f'and 3.81%.</div>', unsafe_allow_html=True)
+            for note in vow["quality"]["notes"]:
+                st.warning(note)
+            flagged = [name for name, key in (("jitter too high", "z_jit"), ("shimmer too high", "z_shim"),
+                                              ("breathiness (low HNR)", "z_hnr")) if vz[key] >= 1.0]
+            st.markdown(verdict_box("Voice stability", vz["z_phon"], used, flagged, age), unsafe_allow_html=True)
+        else:
+            st.caption("No usable vowel recording yet.")
+
+    if vz["z_voc"] is not None:
+        tier = TIERS[vz["tier_voc"]]
+        parts = []
+        if vz["ling_used"]:
+            parts.append(f"speech timing {vz['z_ling']:+.1f} SD")
+        if vz["phon_used"]:
+            parts.append(f"phonation {vz['z_phon']:+.1f} SD")
+        basis = " and ".join(parts)
+        st.markdown(
+            f'<div class="nc-banner" style="background:{tier["bg"]};border-left-color:{tier["color"]}">'
+            f'<div class="t" style="color:{tier["fg"]}">{tier["icon"]} Vocal Biomarker Z-Score: {vz["z_voc"]:+.1f} SD</div>'
+            f'<div class="d">{esc(tier["name"])}. Based on {basis}'
+            f'{", each weighted equally" if len(parts) == 2 else ""}.</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("The Vocal Biomarker Z-Score appears once at least one recording passes the quality check.")
+
+    with st.expander("Voice normative baseline matrix"):
+        rows = [[c, f"{v['jitter'][0]:.2f} ± {v['jitter'][1]:.2f}", f"{v['shimmer'][0]:.1f} ± {v['shimmer'][1]:.1f}",
+                 f"{v['hnr'][0]:.1f} ± {v['hnr'][1]:.1f}", f"{v['art_rate'][0]:.1f} ± {v['art_rate'][1]:.1f}",
+                 f"{100 * v['pause_ratio'][0]:.0f} ± {100 * v['pause_ratio'][1]:.0f}"] for c, v in VOICE_NORMS.items()]
+        active = [c == cohort_for_age(age) for c, *_ in rows]
+        st.markdown(html_table(["Age cohort", "Jitter (%)", "Shimmer (%)", "HNR (dB)", "Articulation rate (syll/s)",
+                                "Pause ratio (%)"], rows, active), unsafe_allow_html=True)
+        st.markdown('<div class="nc-note">Mean ± SD. Prototype reference values for demonstration; they need validation '
+                    "against recordings from a clinical cohort made with the same microphone setup.</div>",
+                    unsafe_allow_html=True)
+
+
+def build_speech_report(V, vz, ctx):
+    rd, vow = V.get("reading"), V.get("vowel")
+    norms = vz["norms"]
+    lines = [f"**Patient {ctx['pid']}**, {ctx['age']} years, cohort {cohort_for_age(ctx['age'])}.", "",
+             "#### 1. What the recordings show"]
+    if rd:
+        pm = norms["pause_ratio"][0]
+        lines.append(
+            f"- **Reading passage:** {rd['span_s']:.1f} s of speech. Articulation rate {rd['art_rate']:.1f} syllables/s "
+            f"against {norms['art_rate'][0]:.1f} ± {norms['art_rate'][1]:.1f} for this age group ({vz['z_rate']:+.1f} SD). "
+            f"Hesitation pause ratio {100 * rd['pause_ratio']:.0f}% against {100 * pm:.0f}% ({vz['z_vpause']:+.1f} SD)."
+            + ("" if vz["ling_used"] else " Not scored because of recording quality.")
+        )
+        if rd["pauses"]:
+            lines.append(f"- **Hesitation pauses over {PAUSE_MIN_S:.1f} s:** {rd['n_pauses']}, totalling {rd['pause_total_s']:.1f} s.")
+            for k, (start, gap) in enumerate(rd["pauses"][:6], start=1):
+                lines.append(f"    - Pause {k}: {gap:.2f} s of silence, starting {start:.1f} s into the reading.")
+        else:
+            lines.append(f"- **Hesitation pauses:** none longer than {PAUSE_MIN_S:.1f} s.")
+        lines.append(f"- **Completeness:** {rd['n_syllables']} of {PASSAGE_SYLLABLES} syllables detected.")
+    if vow:
+        lines.append(
+            f"- **Sustained vowel:** jitter {vow['jitter']:.2f}% ({vz['z_jit']:+.1f} SD), shimmer {vow['shimmer']:.2f}% "
+            f"({vz['z_shim']:+.1f} SD), HNR {vow['hnr']:.1f} dB ({vz['z_hnr']:+.1f} SD), median pitch {vow['f0_hz']:.0f} Hz."
+            + ("" if vz["phon_used"] else " Not scored because of recording quality.")
+        )
+    lines += ["", "#### 2. Interpretation"]
+    zl = vz["z_ling"] if vz["ling_used"] else None
+    zp = vz["z_phon"] if vz["phon_used"] else None
+    if zl is not None and zl >= 1 and (zp is None or zp < 1):
+        lines.append(
+            f"- **Slowed, hesitant speech** ({zl:+.1f} SD)" + (" with normal voice quality" if zp is not None else "")
+            + ". This pattern fits slowing at the level of planning or word retrieval rather than a problem with the voice "
+              "box or the muscles of speech. In a cognitive screen it can accompany early executive or language-retrieval "
+              "difficulty."
+        )
+    if zp is not None and zp >= 1 and (zl is None or zl < 1):
+        lines.append(
+            f"- **Abnormal voice quality** ({zp:+.1f} SD)" + (" with normal speech timing" if zl is not None else "")
+            + ". Laryngeal, respiratory or neurological motor causes (for example vocal-fold problems or tremor) should be "
+              "considered; this finding is not specific to cognition."
+        )
+    if zl is not None and zp is not None and zl >= 1 and zp >= 1:
+        lines.append(
+            f"- **Slowed speech together with unstable voice** (timing {zl:+.1f} SD, voice {zp:+.1f} SD). This combination "
+            "suggests a motor-speech contribution (dysarthria-like) on top of any cognitive slowing."
+        )
+    if (zl is None or zl < 1) and (zp is None or zp < 1):
+        lines.append(
+            "- **No speech or voice markers of concern** in the recordings that passed the quality check."
+            if (zl is not None or zp is not None) else
+            "- No recording passed the quality check, so no interpretation is possible. Please record again."
+        )
+    lines += ["", "#### 3. Suggested next step"]
+    tier = vz["tier_voc"]
+    if tier == 2:
+        lines.append("Refer for a formal assessment (speech and language review, and cognitive testing such as MoCA). "
+                     "This screen does not establish a diagnosis.")
+    elif tier == 1:
+        lines.append("Repeat the recording in a quiet room on another day and compare. Consider a brief paper MoCA.")
+    elif tier == 0:
+        lines.append("No action needed beyond routine follow-up.")
+    else:
+        lines.append("Record again, closer to the microphone and in a quieter place.")
+    return "\n".join(lines)
+
+
+def render_speech_tab(ctx):
+    step_header(
+        1, "Record the patient's speech",
+        "The reading passage drives the linguistic analysis. The sustained vowel adds a voice-stability check. "
+        "Either recording works on its own.",
+    )
+    c1, c2 = st.columns(2, gap="large")
+    with c1:
+        st.markdown("**Reading passage (linguistic analysis)**")
+        st.caption("Press the microphone button, read the passage below aloud at a normal pace, then press stop.")
+        with st.container(border=True):
+            st.markdown(PASSAGE)
+        reading_bytes = capture_audio("Record the patient reading the passage", "voice_reading", 16000)
+    with c2:
+        st.markdown("**Sustained vowel (voice stability)**")
+        st.caption("1. Press the microphone button. 2. Take a breath and say “Ahhh” at a steady, comfortable pitch and "
+                   "loudness for about 5 seconds, holding the device about 20 cm away. 3. Press stop.")
+        vowel_bytes = capture_audio("Record the sustained vowel", "voice_vowel", 44100)
+
+    V = run_voice(vowel_bytes, reading_bytes)
+    for key, label in (("reading", "Reading recording"), ("vowel", "Vowel recording")):
+        if key in V["errors"]:
+            st.warning(f"{label}: {V['errors'][key]}")
+    if not (V["reading"] or V["vowel"]):
+        if not (reading_bytes or vowel_bytes):
+            st.info("Waiting for a recording. The analysis appears here as soon as you stop recording.")
+        return
+
+    vz = voice_zscores(V, ctx["age"])
+    step_header(
+        2, "Speech analysis results",
+        "Each measure is compared with people of the same age group and marked normal, borderline or outside the normal range.",
+    )
+    render_voice_results(V, vz, ctx["age"])
+
+    st.markdown("**Spectrograms**")
+    fig = spectrogram_figure(V)
+    if fig is not None:
+        show_plot(fig)
+        st.caption("Darker means more energy. Red bands: pauses over 0.5 s. Triangles: detected syllables. "
+                   "Amber line: pitch track, with the dashed box marking the analysed window.")
+
+    with st.container(border=True):
+        st.markdown("### 📋 Speech and Voice Report")
+        st.markdown(build_speech_report(V, vz, ctx))
+
+
 def safe_section(label, func, *args):
     try:
         func(*args)
@@ -2110,20 +1956,8 @@ def safe_section(label, func, *args):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def main():
-    st.markdown(CSS, unsafe_allow_html=True)
-    ctx = render_sidebar()
-    render_hero(ctx)
-
+def render_touch_tab(ctx):
     safe_section("Step 1", render_step1, ctx)
-
-    try:
-        V, vz = render_voice_step(ctx)
-    except Exception as exc:
-        st.error(f"Step 2 (voice) could not be displayed ({type(exc).__name__}: {exc}). "
-                 "The touch analysis below is unaffected.")
-        V, vz = None, None
-    voice = {"V": V, "vz": vz} if (V and (V.get("vowel") or V.get("reading"))) else None
 
     raw = resolve_raw(ctx)
     if raw is None:
@@ -2138,7 +1972,7 @@ def main():
         model, n_train = None, 0
 
     try:
-        A = analyze(raw, ctx["age"], ctx["edu"], ctx["vasc_yes"], model, voice)
+        A = analyze(raw, ctx["age"], ctx["edu"], ctx["vasc_yes"], model)
     except Exception as exc:
         st.error(f"The session data could not be analysed ({type(exc).__name__}: {exc}). "
                  "Run the task again or choose a demo preset.")
@@ -2150,10 +1984,23 @@ def main():
     safe_section("Step 3", render_step3, A)
     safe_section("Step 4", render_step4, A, ctx)
 
+
+def main():
+    st.markdown(CSS, unsafe_allow_html=True)
+    ctx = render_sidebar()
+    render_hero(ctx)
+
+    tab_touch, tab_speech = st.tabs(["Touch-screen test", "Speech analysis"])
+    with tab_touch:
+        safe_section("Touch-screen test", render_touch_tab, ctx)
+    with tab_speech:
+        safe_section("Speech analysis", render_speech_tab, ctx)
+
     st.markdown(
         '<div class="nc-foot">NeuroCognitive AI is a research prototype for demonstration. It is a screening aid, '
-        "not a diagnostic device, and its output must be interpreted by a qualified clinician. Normative values "
-        "are illustrative, the machine-learning model is trained on synthetic data, and demo-preset audio is synthetic.</div>",
+        "not a diagnostic device, and its output must be interpreted by a qualified clinician. The touch test and "
+        "the speech analysis are independent of each other. Normative values are illustrative and the "
+        "machine-learning model is trained on synthetic data.</div>",
         unsafe_allow_html=True,
     )
 
